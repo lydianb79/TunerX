@@ -39,6 +39,11 @@ cd TunerX
 ./build_app.sh          # builds build/TunerX.app (release, ad-hoc signed)
 open build/TunerX.app
 ```
+To build separate apps for Apple Silicon and Intel:
+```bash
+./build_arch.sh         # build/TunerX-arm64.app + build/TunerX-x86_64.app (and .zip of each)
+```
+
 On first launch macOS asks for microphone access. That permission is also what lets TunerX read audio interfaces.
 
 To develop in Xcode: run `open Package.swift`, then build. For microphone permission, launch the app from the bundle produced by `build_app.sh`. A bare executable run from Xcode has no `NSMicrophoneUsageDescription` and gets no input.
@@ -57,8 +62,9 @@ Sources/TunerX/
   Shaders.swift            MSL source, compiled at runtime
   GlyphAtlas.swift         CoreText → Metal texture for on-GPU labels
   Views.swift              SwiftUI header, settings sidebar, level meter
-Resources/                 Info.plist, entitlements
-build_app.sh
+Resources/                 Info.plist, entitlements, AppIcon.icns (+ 1024 px PNG master)
+build_app.sh               single-arch build for this Mac
+build_arch.sh              separate arm64 / x86_64 builds
 ```
 
 ## Notes

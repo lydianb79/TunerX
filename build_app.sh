@@ -12,7 +12,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/TunerX"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --options runtime --entitlements Resources/TunerX.entitlements --sign - "$APP"
 
+touch "$APP"   # nudge Finder/Dock to refresh the icon
 echo "Built $APP"
 echo "Run:   open $APP"
