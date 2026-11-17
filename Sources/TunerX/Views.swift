@@ -95,6 +95,28 @@ struct SettingsView: View {
     private let refNotes: [(String, Int)] = [("Follow detected note", -1), ("E2 – low E", 40), ("A2", 45), ("D3", 50),
                                              ("G3", 55), ("B3", 59), ("E4 – high E", 64), ("A4", 69), ("B1 – 7-string", 35)]
 
+    private var outputStatus: String {
+        guard model.outputDeviceID != 0 else { return "No output device: TunerX makes no sound." }
+        if !live.value.outputActive {
+            return "Silent: TunerX sends nothing to the output. Any sound you hear comes from another app or your interface's direct monitoring."
+        }
+        var parts: [String] = []
+        if model.refToneEnabled { parts.append("reference tone") }
+        if model.monitorEnabled { parts.append("input monitoring") }
+        return "Active: TunerX is playing " + parts.joined(separator: " + ") + "."
+    }
+
+    private var humStatus: String {
+        let r = live.value
+        guard r.mainsHz > 0 else { return "Mains hum is not filtered." }
+        let how: String
+        switch model.humFilterMode {
+        case .auto: how = r.mainsDetected ? "measured" : "regional default, still measuring"
+        default: how = "manual"
+        }
+        return String(format: "Removing %.0f Hz hum and harmonics (%@).", r.mainsHz, how)
+    }
+
     var body: some View {
         Form {
             Section("Input") {
@@ -122,6 +144,18 @@ struct SettingsView: View {
                 Toggle("Input monitoring", isOn: $model.monitorEnabled)
                 LabeledContent("Monitor level") { Slider(value: $model.monitorVolume, in: 0...1) }
                     .disabled(!model.monitorEnabled)
+                LevelMeter(db: live.value.outputActive ? live.value.outputDB : -120, label: "TunerX out")
+                Text(outputStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if model.acousticFeedbackRisk && (model.refToneEnabled || model.monitorEnabled) {
+                    Label("The built-in mic hears the built-in speakers, so the tuner will measure its own output. Use headphones.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Toggle("Exclusive output (block other apps)", isOn: $model.exclusiveOutput)
+                    .help("Takes the output device in hog mode so only TunerX can play through it while TunerX runs.")
             }
             .disabled(model.outputDeviceID == 0)
 
@@ -158,6 +192,12 @@ struct SettingsView: View {
                 LabeledContent(String(format: "Noise gate  %.0f dB", model.gateDB)) {
                     Slider(value: $model.gateDB, in: -90...(-20))
                 }
+                Picker("Hum filter", selection: $model.humFilterMode) {
+                    ForEach(HumFilterMode.allCases) { m in Text(m.label).tag(m) }
+                }
+                Text(humStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -171,11 +211,12 @@ struct SettingsView: View {
 
 struct LevelMeter: View {
     let db: Float
+    var label = "Level"
 
     var body: some View {
         let norm = CGFloat(max(0, min(1, (db + 72) / 72)))
         HStack {
-            Text("Level").foregroundStyle(.secondary)
+            Text(label).foregroundStyle(.secondary)
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08))

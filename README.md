@@ -53,6 +53,8 @@ For lowest latency, use a small **Buffer size** (64–128 samples). For maximum 
 - **Audio interface support**: choose any input device and channel (or *Mix all*), and any output device.
 - **Driver settings**: buffer size (16–4096 samples, limited to what the device supports) and sample rate. The active latency is shown.
 - **Reference tone**: a pure sine that follows the detected note or stays on a fixed string. **Input monitoring** is also available.
+- **Output transparency**: TunerX only runs the output device while the reference tone or monitoring is on, and it shows a meter of exactly what it sends. With both off, TunerX makes no sound at all. An optional **exclusive output** mode (hog mode) keeps other apps off the output device while TunerX runs.
+- **Mains-hum filter** (Auto, 50 Hz, 60 Hz or Off): narrow notches at the mains frequency and its harmonics remove hum from single-coil pickups and ground loops before analysis. Auto measures the hum while you're not playing.
 - **Adjustable** A4 reference (400–480 Hz in 0.1 Hz steps), analysis window, smoothing and noise gate. Settings are kept between launches.
 
 ## Precision
@@ -70,6 +72,14 @@ Simulated guitar tones (7 inharmonic partials, decaying envelope, noise at −40
 | Ultra | 32768 | **< 0.005 ¢** |
 
 The audio buffer size only changes **latency**. Precision depends on the analysis window.
+
+### Low strings
+Wound low strings are hard to tune for two reasons, and TunerX handles both:
+- **Weak fundamental**: through a microphone, a low E's fundamental (82 Hz) is often 20–40 dB below its 2nd–6th harmonics. Those harmonics also run sharp, because the string is stiff (fₕ = h·f₀·√(1+B·h²)). Simply dividing one harmonic by its number reads 1–2 ¢ sharp. Instead, TunerX measures every harmonic up to 1.6 kHz and fits the stiff-string model to all of them, each weighted by its signal-to-noise ratio. The fundamental is used on its own only when it is strong.
+- **Mains hum**: 50/60 Hz hum and its harmonics sit right in the low-string range. Without filtering, hum can pull a dying low E down an octave, then lock the display onto the hum itself (G1 +35 ¢). It also biases nearby notes such as D3 (146.8 Hz, next to 150 Hz). The hum filter removes this.
+- **Adaptive window**: low notes automatically get a window at least 24 periods long, even when *Fast* is selected.
+
+In simulation (realistic plucked strings, B = 1–3·10⁻⁴, mic roll-off, 50 Hz hum at −35 dBFS), v1.1 shows no wrong-note readings on B1, D2, E2, A2 or E1 bass, against 20–98 % of frames in v1.0. Bias drops from 1–2 ¢ to under 0.1 ¢.
 
 ## Build from source
 Requirements: macOS 13 or later, and Xcode 15 or later (or the Swift 5.9+ command-line tools).

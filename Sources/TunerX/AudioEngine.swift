@@ -31,6 +31,7 @@ final class AudioEngine {
         var outputDevice: AudioDeviceID  // 0 = none
         var bufferSize: UInt32
         var sampleRate: Double
+        var exclusiveOutput: Bool       // hog mode: no other app can use the output device
     }
 
     static let ringCapacity: UInt32 = 1 << 19
@@ -51,6 +52,13 @@ final class AudioEngine {
     var monitorGain: Float = 0.8
     /// Peak of the input since last read; reset by the reader.
     var inputPeak: Float = 0
+    /// Peak of what TunerX sends to the output since last read; reset by the reader.
+    var outputPeak: Float = 0
+    /// True while the output unit is running. It only runs while the reference tone or monitoring is on,
+    /// so when this is false TunerX produces no sound at all.
+    private(set) var outputActive = false
+    /// The output device TunerX holds in exclusive (hog) mode, if any.
+    private(set) var exclusiveDevice: AudioDeviceID = 0
 
     private let maxFrames = 8192
     private var inputUnit: AudioUnit?
@@ -61,6 +69,8 @@ final class AudioEngine {
     private var selectedChannel = 0
     private var tonePhase: Double = 0
     private var toneGainSmoothed: Float = 0
+    private var monitorWasOn = false
+    private var outputStopToken = 0
 
     deinit {
         stop()
@@ -80,6 +90,9 @@ final class AudioEngine {
         if cfg.sampleRate > 0 { CoreAudioHelper.setNominalSampleRate(inDev, cfg.sampleRate) }
         CoreAudioHelper.setBufferFrameSize(inDev, cfg.bufferSize)
         if cfg.outputDevice != 0 { CoreAudioHelper.setBufferFrameSize(cfg.outputDevice, cfg.bufferSize) }
+        if cfg.exclusiveOutput, cfg.outputDevice != 0, CoreAudioHelper.acquireHog(cfg.outputDevice) {
+            exclusiveDevice = cfg.outputDevice
+        }
 
         do {
             try startInput(device: inDev, channel: cfg.inputChannel)
@@ -96,6 +109,27 @@ final class AudioEngine {
         actualBufferSize = CoreAudioHelper.bufferFrameSize(inDev) ?? cfg.bufferSize
         latencyFrames = CoreAudioHelper.inputLatencyFrames(inDev) + actualBufferSize
         isRunning = true
+        updateOutputActivity()
+    }
+
+    /// Starts the output unit when the reference tone or monitoring needs it, and stops it
+    /// (after the tone has faded out) when neither does. Call on the main thread.
+    func updateOutputActivity() {
+        guard let unit = outputUnit else { outputActive = false; return }
+        let needed = refToneEnabled || monitorEnabled
+        outputStopToken += 1
+        if needed {
+            if !outputActive, AudioOutputUnitStart(unit) == noErr { outputActive = true }
+        } else if outputActive {
+            let token = outputStopToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.outputStopToken == token, let u = self.outputUnit,
+                      !(self.refToneEnabled || self.monitorEnabled) else { return }
+                AudioOutputUnitStop(u)
+                self.outputActive = false
+                self.outputPeak = 0
+            }
+        }
     }
 
     func stop() {
@@ -107,6 +141,12 @@ final class AudioEngine {
         }
         inputUnit = nil
         outputUnit = nil
+        outputActive = false
+        outputStopToken += 1
+        if exclusiveDevice != 0 {
+            CoreAudioHelper.releaseHog(exclusiveDevice)
+            exclusiveDevice = 0
+        }
         if let abl = inputBuffers {
             for b in abl { free(b.mData) }
             free(abl.unsafeMutablePointer)
@@ -197,7 +237,7 @@ final class AudioEngine {
                                         inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
         try setProp(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, cb, "Set render callback")
         try caCheck(AudioUnitInitialize(unit), "Initialize output unit")
-        try caCheck(AudioOutputUnitStart(unit), "Start output unit")
+        // Not started here: updateOutputActivity() runs it only while tone or monitoring is on.
     }
 
     // MARK: Realtime callbacks
@@ -243,7 +283,10 @@ final class AudioEngine {
         }
 
         var got = 0
-        if monitorEnabled {
+        let monitoring = monitorEnabled
+        if monitoring && !monitorWasOn { tx_ring_trim(monitorRing, 0) }   // drop audio left from an earlier session
+        monitorWasOn = monitoring
+        if monitoring {
             tx_ring_trim(monitorRing, UInt32(n * 2 + 64))   // keep monitoring latency bounded
             got = Int(tx_ring_read(monitorRing, outScratch, UInt32(n)))
             var g = monitorGain
@@ -263,6 +306,9 @@ final class AudioEngine {
         } else {
             toneGainSmoothed = 0
         }
+        var peak: Float = 0
+        vDSP_maxmgv(outScratch, 1, &peak, vDSP_Length(n))
+        if peak > outputPeak { outputPeak = peak }
         for b in abl {
             if let d = b.mData { memcpy(d, outScratch, min(Int(b.mDataByteSize), n * 4)) }
         }

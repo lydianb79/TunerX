@@ -143,6 +143,34 @@ enum CoreAudioHelper {
         }
     }
 
+    /// Built-in (MacBook/iMac) microphone or speakers.
+    static func isBuiltIn(_ id: AudioDeviceID) -> Bool {
+        get(id, kAudioDevicePropertyTransportType, initial: UInt32(0)) == kAudioDeviceTransportTypeBuiltIn
+    }
+
+    // MARK: Exclusive access (hog mode)
+
+    /// Process holding the device in hog mode, or -1 if it is free.
+    static func hogOwner(_ id: AudioDeviceID) -> pid_t {
+        get(id, kAudioDevicePropertyHogMode, initial: pid_t(-1)) ?? -1
+    }
+
+    /// Takes exclusive access: while held, no other app can play through (or record from) the device.
+    static func acquireHog(_ id: AudioDeviceID) -> Bool {
+        let me = getpid()
+        if hogOwner(id) == me { return true }
+        guard hogOwner(id) == -1 else { return false }
+        set(id, kAudioDevicePropertyHogMode, value: me)
+        return hogOwner(id) == me
+    }
+
+    static func releaseHog(_ id: AudioDeviceID) {
+        let me = getpid()
+        guard hogOwner(id) == me else { return }
+        set(id, kAudioDevicePropertyHogMode, value: pid_t(-1))
+        if hogOwner(id) == me { set(id, kAudioDevicePropertyHogMode, value: me) }   // drivers that toggle
+    }
+
     // MARK: Latency
 
     /// Total input-side latency in frames (device latency + safety offset), excluding the IO buffer.

@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import CoreAudio
@@ -45,6 +46,10 @@ struct Readout: Equatable {
     var target: Double = 0
     var clarity: Float = 0
     var levelDB: Float = -120
+    var outputDB: Float = -120
+    var outputActive = false
+    var mainsHz: Double = 0          // hum filter in use (0 = off)
+    var mainsDetected = false        // Auto has measured the mains frequency
 }
 
 final class LiveReadout: ObservableObject {
@@ -79,6 +84,7 @@ private struct AnalysisParams {
     var gate: Float = 0.001
     var smoothing = 0.5
     var refMidi = -1
+    var humMode: HumFilterMode = .auto
 }
 
 final class TunerModel: ObservableObject {
@@ -117,11 +123,21 @@ final class TunerModel: ObservableObject {
     @Published var a4: Double = 440 { didSet { pushParams(); saveDefaults() } }
     @Published var smoothing: Double = 0.5 { didSet { pushParams(); saveDefaults() } }
     @Published var gateDB: Double = -60 { didSet { pushParams(); saveDefaults() } }
-    @Published var refToneEnabled = false { didSet { engine.refToneEnabled = refToneEnabled } }
+    @Published var refToneEnabled = false {
+        didSet { engine.refToneEnabled = refToneEnabled; engine.updateOutputActivity() }
+    }
     @Published var refToneMidi: Int = -1 { didSet { pushParams(); updateFixedRefTone() } }
     @Published var refToneVolume: Double = 0.25 { didSet { engine.refToneGain = Float(refToneVolume * refToneVolume) } }
-    @Published var monitorEnabled = false { didSet { engine.monitorEnabled = monitorEnabled } }
+    @Published var monitorEnabled = false {
+        didSet { engine.monitorEnabled = monitorEnabled; engine.updateOutputActivity() }
+    }
     @Published var monitorVolume: Double = 0.8 { didSet { engine.monitorGain = Float(monitorVolume) } }
+    @Published var humFilterMode: HumFilterMode = .auto { didSet { pushParams(); saveDefaults() } }
+    @Published var exclusiveOutput = false {
+        didSet { guard !suppress, oldValue != exclusiveOutput else { return }; saveDefaults(); scheduleRestart() }
+    }
+    /// Input and output are the Mac's built-in mic and speakers, so the mic hears TunerX's own output.
+    @Published var acousticFeedbackRisk = false
 
     private var suppress = false
     private var restartPending = false
@@ -131,10 +147,19 @@ final class TunerModel: ObservableObject {
     // Analysis thread state (only touched on analysisQueue)
     private let analysisQueue = DispatchQueue(label: "tunerx.analysis", qos: .userInteractive)
     private var timer: DispatchSourceTimer?
-    private var detector: PitchDetector?
-    private var analysisBuffer: UnsafeMutablePointer<Float>?
-    private var analysisSize = 0
-    private var history: [Double] = []
+    private var detectors: [Int: PitchDetector] = [:]
+    private let analysisBuffer = UnsafeMutablePointer<Float>.allocate(capacity: 131072)
+    private let chunk = UnsafeMutablePointer<Float>.allocate(capacity: 8192)
+    private let samples = SampleHistory(capacity: 262144)
+    private let humFilter = HumFilter()
+    private let mainsDetector = MainsDetector()
+    private var analysisSR: Double = 0
+    private var userWindowSize = 16384
+    private var maxWindowSize = 16384
+    private var lastFrequency: Double?
+    private var lastHasSignal = false
+    private var outputDB: Float = -120
+    private var trackHistory: [Double] = []
     private var smoothedMC: Double?
     private var pendingMC: Double?
     private var pendingCount = 0
@@ -145,6 +170,12 @@ final class TunerModel: ObservableObject {
     private let paramsLock = NSLock()
     private var params = AnalysisParams()
 
+    deinit {
+        timer?.cancel()
+        analysisBuffer.deallocate()
+        chunk.deallocate()
+    }
+
     init() {
         loadDefaults()
         pushParams()
@@ -154,6 +185,11 @@ final class TunerModel: ObservableObject {
         installDeviceListener()
         startAnalysisTimer()
         requestMicrophoneAndStart()
+        // Release exclusive access (and stop audio) cleanly when the app quits.
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.engine.stop()
+        }
     }
 
     // MARK: Persistence
@@ -166,6 +202,8 @@ final class TunerModel: ObservableObject {
         if defaults.object(forKey: "smoothing") != nil { smoothing = defaults.double(forKey: "smoothing") }
         if defaults.object(forKey: "gateDB") != nil { gateDB = defaults.double(forKey: "gateDB") }
         if defaults.object(forKey: "bufferSize") != nil { bufferSize = UInt32(defaults.integer(forKey: "bufferSize")) }
+        if let h = defaults.string(forKey: "humFilter").flatMap(HumFilterMode.init(rawValue:)) { humFilterMode = h }
+        exclusiveOutput = defaults.bool(forKey: "exclusiveOutput")
     }
 
     private func saveDefaults() {
@@ -178,6 +216,8 @@ final class TunerModel: ObservableObject {
         defaults.set(inputDevices.first { $0.id == inputDeviceID }?.uid, forKey: "inputUID")
         defaults.set(outputDevices.first { $0.id == outputDeviceID }?.uid ?? "", forKey: "outputUID")
         defaults.set(inputChannel, forKey: "inputChannel")
+        defaults.set(humFilterMode.rawValue, forKey: "humFilter")
+        defaults.set(exclusiveOutput, forKey: "exclusiveOutput")
     }
 
     // MARK: Devices
@@ -270,7 +310,10 @@ final class TunerModel: ObservableObject {
         guard micAuthorized else { return }
         guard inputDeviceID != 0 else { status = "No input device"; return }
         let cfg = AudioEngine.Config(inputDevice: inputDeviceID, inputChannel: inputChannel,
-                                     outputDevice: outputDeviceID, bufferSize: bufferSize, sampleRate: sampleRate)
+                                     outputDevice: outputDeviceID, bufferSize: bufferSize, sampleRate: sampleRate,
+                                     exclusiveOutput: exclusiveOutput)
+        acousticFeedbackRisk = outputDeviceID != 0
+            && CoreAudioHelper.isBuiltIn(inputDeviceID) && CoreAudioHelper.isBuiltIn(outputDeviceID)
         do {
             try engine.start(cfg)
             let sr = engine.sampleRate
@@ -281,6 +324,9 @@ final class TunerModel: ObservableObject {
             activeInfo = String(format: "%.0f Hz · %u frames (%.2f ms) · input latency %.2f ms",
                                 sr, buf, Double(buf) / sr * 1000, Double(engine.latencyFrames) / sr * 1000)
             status = "Running"
+            if exclusiveOutput && outputDeviceID != 0 && engine.exclusiveDevice == 0 {
+                status = "Running – exclusive output not available (device is in use by another app)"
+            }
             rebuildDetector()
         } catch {
             status = error.localizedDescription
@@ -296,6 +342,7 @@ final class TunerModel: ObservableObject {
         params.gate = Float(pow(10, gateDB / 20))
         params.smoothing = smoothing
         params.refMidi = refToneMidi
+        params.humMode = humFilterMode
         paramsLock.unlock()
     }
 
@@ -308,18 +355,42 @@ final class TunerModel: ObservableObject {
         if refToneMidi >= 0 { engine.refToneFrequency = a4 * pow(2, Double(refToneMidi - 69) / 12) }
     }
 
+    /// Called after every engine (re)start and when the analysis window changes.
     private func rebuildDetector() {
         let sr = engine.sampleRate
-        let n = analysisWindow.frameCount(sampleRate: sr)
+        let userN = analysisWindow.frameCount(sampleRate: sr)
+        let maxN = max(userN, AnalysisWindow.precise.frameCount(sampleRate: sr))
         analysisQueue.async { [weak self] in
             guard let self else { return }
-            self.analysisBuffer?.deallocate()
-            self.analysisBuffer = .allocate(capacity: n)
-            self.analysisSize = n
-            self.detector = PitchDetector(size: n, sampleRate: sr)
-            self.history.removeAll()
+            if sr != self.analysisSR {
+                self.detectors.removeAll()
+                self.mainsDetector.configure(sampleRate: sr)
+            }
+            self.analysisSR = sr
+            self.userWindowSize = userN
+            self.maxWindowSize = maxN
+            self.samples.reset()
+            self.humFilter.reset()
+            self.trackHistory.removeAll()
             self.smoothedMC = nil
+            self.lastFrequency = nil
         }
+    }
+
+    private func detector(size: Int) -> PitchDetector {
+        if let d = detectors[size] { return d }
+        let d = PitchDetector(size: size, sampleRate: analysisSR)
+        detectors[size] = d
+        return d
+    }
+
+    /// Low notes need a longer window: at least 24 periods (12 per phase-vocoder half).
+    private func windowSize(for frequency: Double?) -> Int {
+        guard let f = frequency, f > 0 else { return userWindowSize }
+        let need = Int((24 * analysisSR / f).rounded(.up))
+        var n = 1
+        while n < need { n <<= 1 }
+        return min(max(userWindowSize, n), maxWindowSize)
     }
 
     private func startAnalysisTimer() {
@@ -334,21 +405,60 @@ final class TunerModel: ObservableObject {
         let now = CACurrentMediaTime()
         let p = readParams()
 
-        // Input level (peak hold with decay)
+        // Input / output levels (peak hold with decay)
         let peak = engine.inputPeak
         engine.inputPeak = 0
-        let peakDB = 20 * log10(max(peak, 1e-6))
-        levelDB = max(peakDB, levelDB - 0.8)
+        levelDB = max(20 * log10(max(peak, 1e-6)), levelDB - 0.8)
+        let outPeak = engine.outputPeak
+        engine.outputPeak = 0
+        outputDB = max(20 * log10(max(outPeak, 1e-6)), outputDB - 0.8)
 
-        if let det = detector, let buf = analysisBuffer, engine.isRunning,
-           tx_ring_copy_latest(engine.analysisRing, buf, UInt32(analysisSize)) == 1 {
-            det.gate = p.gate
-            let r = det.analyze(buf)
-            lastClarity = r.clarity
-            if let f = r.frequency, f > 0 { track(midiCents: 6900 + 1200 * log2(f / p.a4), now: now, smoothing: p.smoothing) }
+        // Hum filter in use
+        let mains: Double
+        switch p.humMode {
+        case .off: mains = 0
+        case .hz50: mains = 50
+        case .hz60: mains = 60
+        case .auto: mains = mainsDetector.detected > 0 ? mainsDetector.detected : HumFilterMode.regionalMains
+        }
+
+        if engine.isRunning && analysisSR > 0 {
+            humFilter.configure(mains: mains, sampleRate: analysisSR)
+            // Pull every new sample: measure mains hum on the raw input, then notch it out.
+            while true {
+                let got = Int(tx_ring_read(engine.analysisRing, chunk, 8192))
+                if got == 0 { break }
+                mainsDetector.process(chunk, count: got, quiet: !lastHasSignal)
+                humFilter.process(chunk, count: got)
+                samples.append(chunk, count: got)
+                if got < 8192 { break }
+            }
+
+            let n = windowSize(for: lastFrequency)
+            if samples.copyLatest(n, into: analysisBuffer) {
+                let det = detector(size: n)
+                det.gate = p.gate
+                var r = det.analyze(analysisBuffer)
+                if let f = r.frequency {
+                    let n2 = windowSize(for: f)
+                    if n2 > n, samples.copyLatest(n2, into: analysisBuffer) {
+                        let big = detector(size: n2)
+                        big.gate = p.gate
+                        let r2 = big.analyze(analysisBuffer)
+                        if r2.frequency != nil { r = r2 }
+                    }
+                }
+                lastClarity = r.clarity
+                if let f = r.frequency, f > 0 {
+                    lastFrequency = f
+                    track(midiCents: 6900 + 1200 * log2(f / p.a4), now: now, smoothing: p.smoothing)
+                }
+            }
         }
 
         let hasSignal = smoothedMC != nil && now - lastDetection < 0.6
+        lastHasSignal = hasSignal
+        if !hasSignal { lastFrequency = nil }
         let mc = smoothedMC ?? 6900
         let midi = Int((mc / 100).rounded())
         let cents = mc - Double(midi) * 100
@@ -368,7 +478,11 @@ final class TunerModel: ObservableObject {
                              frequency: p.a4 * pow(2, (mc - 6900) / 1200),
                              target: p.a4 * pow(2, Double(midi - 69) / 12),
                              clarity: lastClarity,
-                             levelDB: levelDB)
+                             levelDB: levelDB,
+                             outputDB: outputDB,
+                             outputActive: engine.outputActive,
+                             mainsHz: mains,
+                             mainsDetected: mainsDetector.detected > 0)
             DispatchQueue.main.async { [weak self] in
                 if self?.live.value != ro { self?.live.value = ro }
             }
@@ -385,16 +499,16 @@ final class TunerModel: ObservableObject {
         if let s = smoothedMC, abs(mc - s) > 40, !silentGap {
             if let p = pendingMC, abs(mc - p) < 40 { pendingCount += 1 } else { pendingMC = mc; pendingCount = 1 }
             if pendingCount >= 3 {
-                history = [mc]; smoothedMC = mc; pendingMC = nil; pendingCount = 0
+                trackHistory = [mc]; smoothedMC = mc; pendingMC = nil; pendingCount = 0
             }
             return
         }
         pendingMC = nil
         pendingCount = 0
-        if smoothedMC == nil || silentGap { history.removeAll(); smoothedMC = mc }
-        history.append(mc)
-        if history.count > historyLength { history.removeFirst(history.count - historyLength) }
-        let sorted = history.sorted()
+        if smoothedMC == nil || silentGap { trackHistory.removeAll(); smoothedMC = mc }
+        trackHistory.append(mc)
+        if trackHistory.count > historyLength { trackHistory.removeFirst(trackHistory.count - historyLength) }
+        let sorted = trackHistory.sorted()
         let median = sorted.count % 2 == 1 ? sorted[sorted.count / 2]
                                            : 0.5 * (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2])
         smoothedMC = (smoothedMC ?? median) + alpha * (median - (smoothedMC ?? median))
