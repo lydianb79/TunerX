@@ -15,6 +15,10 @@
   <img src="https://img.shields.io/badge/arch-arm64%20%7C%20x86__64-lightgrey" alt="arm64 | x86_64">
 </p>
 
+<p align="center">
+  <img src="docs/screenshot.jpg" width="900" alt="TunerX main window: note readout, strobe, chromatic wide scale, ±50 ¢ fine scale and ±5 ¢ micro scale, with the input/output/driver settings sidebar">
+</p>
+
 ---
 
 ## Download
@@ -146,6 +150,7 @@ Sources/TunerX/
   GlyphAtlas.swift         CoreText → Metal texture for on-GPU labels
   Views.swift              SwiftUI header, settings sidebar, level meters
 Resources/                 Info.plist, entitlements, AppIcon.icns, AppIcon.png (1024 px)
+docs/screenshot.jpg        README screenshot
 build_app.sh               build for this Mac
 build_arch.sh              separate arm64 and x86_64 builds and zips
 ```
