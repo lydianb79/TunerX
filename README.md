@@ -157,7 +157,10 @@ build_arch.sh              separate arm64 and x86_64 builds and zips
 - Exclusive output (hog mode) also blocks system sounds on that device. TunerX releases it when it quits or when you turn the option off.
 
 ## Changelog
-### 1.1.0 (unreleased)
+### 1.1.1
+- Fixed: panel titles on the Metal scale ("CHROMATIC", "FINE", "MICRO") were cut off at the left edge.
+
+### 1.1.0
 - **Low strings**: mains-hum filter (Auto/50/60/Off), a stiff-string fit across all harmonics for weak fundamentals, and an adaptive window for low notes. These remove octave-down and hum (G1 +35 ¢) readings and the 1–2 ¢ sharp bias through microphones.
 - **Output**: the output device only runs while the tone or monitoring is on. Adds a "TunerX out" meter and status line, a warning for built-in mic and speaker feedback, and optional exclusive output. Fixes stale audio briefly replaying when monitoring is re-enabled.
 

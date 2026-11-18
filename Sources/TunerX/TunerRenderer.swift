@@ -164,7 +164,7 @@ final class TunerRenderer: NSObject, MTKViewDelegate {
     private func panel(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, title: String) {
         quad(x0, y0, x1, y1, SIMD4(0.062, 0.068, 0.082, 1))
         quad(x0, y0, x1, y0 + px, SIMD4(1, 1, 1, 0.05))
-        text(title, x: x0 + 12 * px, y: y0 + 6 * px, size: 12 * px, color: SIMD4(0.55, 0.58, 0.64, 1))
+        text(title, x: x0 + 12 * px, y: y0 + 6 * px, size: 12 * px, color: SIMD4(0.55, 0.58, 0.64, 1), align: .left)
     }
 
     private func drawStrobe(x0: Float, y0: Float, x1: Float, y1: Float, snap: DisplaySnapshot) {
