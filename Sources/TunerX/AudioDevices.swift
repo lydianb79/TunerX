@@ -24,7 +24,9 @@ enum CoreAudioHelper {
         var addr = address(selector, scope)
         var value = initial
         var size = UInt32(MemoryLayout<T>.size)
-        let status = AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &value)
+        let status = withUnsafeMutablePointer(to: &value) { ptr in
+            AudioObjectGetPropertyData(object, &addr, 0, nil, &size, ptr)
+        }
         return status == noErr ? value : nil
     }
 
@@ -33,7 +35,9 @@ enum CoreAudioHelper {
                        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal, value: T) -> OSStatus {
         var addr = address(selector, scope)
         var v = value
-        return AudioObjectSetPropertyData(object, &addr, 0, nil, UInt32(MemoryLayout<T>.size), &v)
+        return withUnsafePointer(to: &v) { ptr in
+            AudioObjectSetPropertyData(object, &addr, 0, nil, UInt32(MemoryLayout<T>.size), ptr)
+        }
     }
 
     static func string(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {

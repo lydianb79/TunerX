@@ -174,7 +174,10 @@ final class AudioEngine {
     private func setProp<T>(_ unit: AudioUnit, _ prop: AudioUnitPropertyID, _ scope: AudioUnitScope,
                             _ element: AudioUnitElement, _ value: T, _ what: String) throws {
         var v = value
-        try caCheck(AudioUnitSetProperty(unit, prop, scope, element, &v, UInt32(MemoryLayout<T>.size)), what)
+        let status = withUnsafePointer(to: &v) { ptr in
+            AudioUnitSetProperty(unit, prop, scope, element, ptr, UInt32(MemoryLayout<T>.size))
+        }
+        try caCheck(status, what)
     }
 
     private func floatFormat(rate: Double, channels: Int) -> AudioStreamBasicDescription {
