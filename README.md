@@ -57,6 +57,23 @@ For lowest latency, use a small **Buffer size** (64–128 samples). For maximum 
 - **Mains-hum filter** (Auto, 50 Hz, 60 Hz or Off): narrow notches at the mains frequency and its harmonics remove hum from single-coil pickups and ground loops before analysis. Auto measures the hum while you're not playing.
 - **Adjustable** A4 reference (400–480 Hz in 0.1 Hz steps), analysis window, smoothing and noise gate. Settings are kept between launches.
 
+## Settings reference
+| Section | Setting | What it does |
+|---|---|---|
+| Input | Device / Channel | Where TunerX listens. *Mix all* averages every input channel. |
+| Output | Device | Where the reference tone and monitoring play. *None* means TunerX can never make sound. |
+| | Reference tone / Tone pitch / Tone level | Plays a pure sine at the detected note or at a fixed string. |
+| | Input monitoring / Monitor level | Passes your input through to the output. |
+| | TunerX out (meter + status) | Shows exactly what TunerX is sending. *Silent* means the output device isn't even running. |
+| | Exclusive output | Takes the output device in hog mode, so no other app can play through it while TunerX runs. |
+| Driver | Buffer size | IO buffer size. Smaller means lower latency; it doesn't change precision. |
+| | Sample rate | The device's nominal rate. Changing it affects the whole system. |
+| Analysis | Window | Analysis length: Fast, Balanced, Precise or Ultra. Low notes automatically get at least 24 periods. |
+| | Reference A4 | Concert pitch, 400–480 Hz. |
+| | Smoothing | Steadiness versus responsiveness of the readout. |
+| | Noise gate | Signals below this RMS level are ignored. |
+| | Hum filter | Removes 50/60 Hz mains hum and its harmonics before analysis. *Auto* measures it while you're not playing. |
+
 ## Precision
 Pitch detection works in two stages:
 1. **McLeod Pitch Method** (NSDF from an FFT autocorrelation) gives a robust estimate without octave errors, accurate to about ±1 cent.
@@ -80,6 +97,13 @@ Wound low strings are hard to tune for two reasons, and TunerX handles both:
 - **Adaptive window**: low notes automatically get a window at least 24 periods long, even when *Fast* is selected.
 
 In simulation (realistic plucked strings, B = 1–3·10⁻⁴, mic roll-off, 50 Hz hum at −35 dBFS), v1.1 shows no wrong-note readings on B1, D2, E2, A2 or E1 bass, against 20–98 % of frames in v1.0. Bias drops from 1–2 ¢ to under 0.1 ¢.
+
+## Troubleshooting
+- **I hear sound but the reference tone and monitoring are off.** Check the *TunerX out* status. If it says *Silent*, TunerX isn't running the output device at all. The sound is coming from your audio interface's direct or hardware monitoring, or from another app. Turn on *Exclusive output* to keep other apps off that device.
+- **Low strings jump an octave or show G1/A♯1 when nothing is playing.** That is mains hum. Set *Hum filter* to *Auto*, or to your mains frequency (50 Hz in Europe, 60 Hz in North America). Auto needs a few seconds of quiet to measure it.
+- **The readout is jumpy.** Raise *Smoothing*, choose a longer *Window*, or raise the *Noise gate* if the room is noisy.
+- **No input level.** Allow microphone access in *System Settings → Privacy & Security → Microphone*. macOS requires it for audio interfaces too. Then check the input *Channel*.
+- **The tuner reads its own tone.** You're using speakers with a microphone. Use headphones, or turn the reference tone off while you measure.
 
 ## Build from source
 Requirements: macOS 13 or later, and Xcode 15 or later (or the Swift 5.9+ command-line tools).
@@ -114,12 +138,13 @@ Sources/TunerX/
   TunerXApp.swift          app entry point
   AudioDevices.swift       CoreAudio HAL: devices, channels, buffer sizes, sample rates, latency
   AudioEngine.swift        AUHAL input and output units, realtime callbacks, reference tone, monitoring
-  PitchDetector.swift      MPM + phase-difference refinement (Accelerate)
+  PitchDetector.swift      MPM + phase-vocoder refinement + stiff-string fit (Accelerate)
+  HumFilter.swift          mains-hum notch filter, 50/60 Hz auto-detection, sample history
   TunerModel.swift         settings, device handling, analysis thread, note tracking and smoothing
   TunerRenderer.swift      Metal renderer (strobe, wide scale, ±50 ¢, ±5 ¢)
   Shaders.swift            MSL source, compiled at runtime
   GlyphAtlas.swift         CoreText → Metal texture for on-GPU labels
-  Views.swift              SwiftUI header, settings sidebar, level meter
+  Views.swift              SwiftUI header, settings sidebar, level meters
 Resources/                 Info.plist, entitlements, AppIcon.icns, AppIcon.png (1024 px)
 build_app.sh               build for this Mac
 build_arch.sh              separate arm64 and x86_64 builds and zips
@@ -128,4 +153,13 @@ build_arch.sh              separate arm64 and x86_64 builds and zips
 ## Notes
 - The buffer size setting changes the device's IO buffer for TunerX only. The sample rate setting changes the device's nominal rate, which affects the whole system.
 - Monitoring and the reference tone run at the input sample rate. The AUHAL converts them to the output device's rate.
-- If you monitor through speakers while the input is a microphone, the tuner will hear its own reference tone. Use headphones.
+- If you monitor through speakers while the input is a microphone, the tuner will hear its own output. TunerX warns when the built-in mic and built-in speakers are both selected. Use headphones.
+- Exclusive output (hog mode) also blocks system sounds on that device. TunerX releases it when it quits or when you turn the option off.
+
+## Changelog
+### 1.1.0 (unreleased)
+- **Low strings**: mains-hum filter (Auto/50/60/Off), a stiff-string fit across all harmonics for weak fundamentals, and an adaptive window for low notes. These remove octave-down and hum (G1 +35 ¢) readings and the 1–2 ¢ sharp bias through microphones.
+- **Output**: the output device only runs while the tone or monitoring is on. Adds a "TunerX out" meter and status line, a warning for built-in mic and speaker feedback, and optional exclusive output. Fixes stale audio briefly replaying when monitoring is re-enabled.
+
+### 1.0.0
+- First release: Metal strobe, wide, fine and micro scales; MPM + phase-difference detection; device, channel, buffer and sample-rate selection; reference tone and monitoring; app icon; separate arm64 and x86_64 builds.
